@@ -1,4 +1,5 @@
 use core::ffi::c_int;
+use core::ptr::NonNull;
 use core::{
     alloc::Layout,
     ffi::{c_uint, c_void},
@@ -170,17 +171,19 @@ impl<'a> Allocator<'a> {
 
         // Safety: we assume allocating works correctly in the safety assumptions on
         // `DeflateStream` and `InflateStream`.
-        let ptr = unsafe { (self.zalloc)(self.opaque, (layout.size() + extra_space) as _, 1) };
+        let unaligned_ptr =
+            unsafe { (self.zalloc)(self.opaque, (layout.size() + extra_space) as _, 1) };
 
-        if ptr.is_null() {
-            return ptr;
+        if unaligned_ptr.is_null() {
+            return unaligned_ptr;
         }
 
         // Calculate return pointer address with space enough to store original pointer
-        let align_diff = (ptr as usize).next_multiple_of(layout.align()) - (ptr as usize);
+        let align_diff =
+            (unaligned_ptr as usize).next_multiple_of(layout.align()) - (unaligned_ptr as usize);
 
         // Safety: offset is smaller than 64, and we allocated 64 extra bytes in the allocation
-        let mut return_ptr = unsafe { ptr.cast::<u8>().add(align_diff) };
+        let mut return_ptr = unsafe { unaligned_ptr.cast::<u8>().add(align_diff) };
 
         // if there is not enough space to store a pointer we need to make more
         if align_diff < core::mem::size_of::<*mut c_void>() {
@@ -197,10 +200,16 @@ impl<'a> Allocator<'a> {
         //
         // Safety: `align >= size_of::<*mut _>`, so there is now space for a pointer before `return_ptr`
         // in the allocation
-        unsafe {
+        let original_ptr = unsafe {
             let original_ptr = return_ptr.sub(core::mem::size_of::<*mut c_void>());
-            core::ptr::write_unaligned(original_ptr.cast::<*mut c_void>(), ptr);
+            core::ptr::write_unaligned(original_ptr.cast::<*mut c_void>(), unaligned_ptr);
+            original_ptr
         };
+
+        println!(
+            "ptr: {:?}, actual_data: {:?}, allocation_ptr: {:?}",
+            unaligned_ptr, return_ptr, original_ptr
+        );
 
         // Return properly aligned pointer in allocation
         let ptr = return_ptr.cast::<c_void>();
@@ -230,6 +239,25 @@ impl<'a> Allocator<'a> {
         }
     }
 
+    pub fn allocate_hack<T>(&self) -> Option<NonNull<T>> {
+        NonNull::new(self.allocate_layout(Layout::new::<T>()).cast())
+    }
+
+    // pub fn allocate_hack_slice<T>(&self, len: usize) -> Option<Allocation<T>> {
+    //     let (allocation_ptr, aligned_ptr) = self.allocate_layout(Layout::array::<T>(len).ok()?);
+
+    //     if aligned_ptr.is_null() {
+    //         None
+    //     } else {
+    //         Some(Allocation {
+    //             allocation_ptr,
+    //             aligned_ptr,
+    //             len,
+    //             _phantom: PhantomData,
+    //         })
+    //     }
+    // }
+
     /// # Panics
     ///
     /// - when `len` is 0
@@ -255,6 +283,25 @@ impl<'a> Allocator<'a> {
 
             (self.zfree)(self.opaque, free_ptr)
         }
+    }
+
+    pub unsafe fn deallocate_nonnull<T>(&self, ptr: NonNull<T>, len: usize) {
+        // Special case for the Rust `alloc` backed allocator
+        #[cfg(feature = "rust-allocator")]
+        if self.zfree == Allocator::RUST.zfree {
+            assert_ne!(len, 0, "invalid size for {:?}", ptr);
+            let mut size = core::mem::size_of::<T>() * len;
+            return (Allocator::RUST.zfree)(
+                &mut size as *mut usize as *mut c_void,
+                ptr.as_ptr().cast(),
+            );
+        }
+
+        // General case for c-style allocation
+        let original_ptr = ptr.byte_sub(core::mem::size_of::<*const c_void>());
+        let free_ptr = core::ptr::read_unaligned(original_ptr.as_ptr() as *mut *mut c_void);
+
+        (self.zfree)(self.opaque, free_ptr)
     }
 }
 
@@ -306,6 +353,50 @@ mod tests {
             assert_eq!(ptr.as_ptr() as usize % core::mem::align_of::<T>(), 0);
             unsafe { allocator.deallocate(ptr.as_mut_ptr(), 10) }
         }
+    }
+
+    fn unaligned_allocator_hack<T>() {
+        let mut buf = [0u8; 1024];
+
+        // we don't want anyone else messing with the PTR static
+        let _guard = MUTEX.lock().unwrap();
+
+        for i in 0..64 {
+            let ptr = unsafe { buf.as_mut_ptr().add(i).cast() };
+            PTR.store(ptr, Ordering::Relaxed);
+
+            let allocator = Allocator {
+                zalloc: unaligned_alloc,
+                zfree: unaligned_free,
+                opaque: core::ptr::null_mut(),
+                _marker: PhantomData,
+            };
+
+            let ptr = allocator.allocate_hack::<T>().unwrap();
+            assert_eq!(ptr.as_ptr() as usize % core::mem::align_of::<T>(), 0);
+            unsafe { allocator.deallocate_nonnull(ptr, 1) }
+
+            // let alloc = allocator.allocate_hack_slice::<T>(10).unwrap();
+            // assert_eq!(
+            //     alloc.as_slice().as_ptr() as usize % core::mem::align_of::<T>(),
+            //     0
+            // );
+            // unsafe { allocator.deallocate_alloc(alloc) }
+        }
+    }
+
+    #[test]
+    fn unaligned_allocator_hack_0() {
+        unaligned_allocator_hack::<u32>();
+        unaligned_allocator_hack::<u128>();
+
+        #[repr(C, align(32))]
+        struct Align32(u8);
+        unaligned_allocator_hack::<Align32>();
+
+        #[repr(C, align(64))]
+        struct Align64(u8);
+        unaligned_allocator_hack::<Align64>();
     }
 
     #[test]
