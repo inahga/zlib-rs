@@ -19,7 +19,7 @@ pub type voidpc = *const c_void;
 pub type voidpf = *mut c_void;
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct z_stream {
     pub next_in: *const Bytef,
     pub avail_in: uInt,
