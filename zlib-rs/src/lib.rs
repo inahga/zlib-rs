@@ -52,6 +52,7 @@ pub const MAX_WBITS: i32 = 15; // 32kb LZ77 window
 pub(crate) const DEF_WBITS: i32 = MAX_WBITS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "__internal-fuzz", derive(arbitrary::Arbitrary))]
 pub enum DeflateFlush {
     #[default]
     /// if flush is set to `NoFlush`, that allows deflate to decide how much data
@@ -129,6 +130,7 @@ impl TryFrom<i32> for DeflateFlush {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "__internal-fuzz", derive(arbitrary::Arbitrary))]
 pub enum InflateFlush {
     #[default]
     NoFlush = 0,
