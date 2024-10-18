@@ -1003,7 +1003,7 @@ impl<'a> State<'a> {
                     continue 'label;
                 }
                 Mode::Check => {
-                    if self.wrap != 0 {
+                    if !cfg!(feature = "__internal-fuzz-disable-checksum") && self.wrap != 0 {
                         need_bits!(self, 32);
 
                         self.total += self.writer.len();
