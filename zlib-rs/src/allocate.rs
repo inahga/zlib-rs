@@ -1,4 +1,5 @@
 use core::ffi::c_int;
+use core::ptr::NonNull;
 use core::{
     alloc::Layout,
     ffi::{c_uint, c_void},
@@ -210,24 +211,12 @@ impl<'a> Allocator<'a> {
         ptr
     }
 
-    pub fn allocate<T>(&self) -> Option<&'a mut MaybeUninit<T>> {
-        let ptr = self.allocate_layout(Layout::new::<T>());
-
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { &mut *(ptr as *mut MaybeUninit<T>) })
-        }
+    pub fn allocate<T>(&self) -> Option<*mut MaybeUninit<T>> {
+        Some(self.allocate_layout(Layout::new::<T>()).cast())
     }
 
-    pub fn allocate_slice<T>(&self, len: usize) -> Option<&'a mut [MaybeUninit<T>]> {
-        let ptr = self.allocate_layout(Layout::array::<T>(len).ok()?);
-
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { core::slice::from_raw_parts_mut(ptr.cast(), len) })
-        }
+    pub fn allocate_slice<T>(&self, len: usize) -> Option<*mut MaybeUninit<T>> {
+        Some(self.allocate_layout(Layout::array::<T>(len).ok()?).cast())
     }
 
     /// # Panics
@@ -299,12 +288,12 @@ mod tests {
             };
 
             let ptr = allocator.allocate::<T>().unwrap();
-            assert_eq!(ptr.as_ptr() as usize % core::mem::align_of::<T>(), 0);
+            assert_eq!(ptr as usize % core::mem::align_of::<T>(), 0);
             unsafe { allocator.deallocate(ptr, 1) }
 
             let ptr = allocator.allocate_slice::<T>(10).unwrap();
-            assert_eq!(ptr.as_ptr() as usize % core::mem::align_of::<T>(), 0);
-            unsafe { allocator.deallocate(ptr.as_mut_ptr(), 10) }
+            assert_eq!(ptr as usize % core::mem::align_of::<T>(), 0);
+            unsafe { allocator.deallocate(ptr, 10) }
         }
     }
 

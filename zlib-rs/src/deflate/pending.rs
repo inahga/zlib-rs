@@ -1,4 +1,4 @@
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ptr::NonNull};
 
 use crate::allocate::Allocator;
 
@@ -66,12 +66,13 @@ impl<'a> Pending<'a> {
     }
 
     pub(crate) fn new_in(alloc: &Allocator<'a>, len: usize) -> Option<Self> {
-        let range = alloc.allocate_slice::<u8>(len)?.as_mut_ptr_range();
+        let ptr = alloc.allocate_slice::<u8>(len)?;
 
         Some(Self {
-            buf: range.start as *mut u8,
-            out: range.start as *mut u8,
-            end: range.end as *mut u8,
+            buf: ptr.as_ptr().cast(),
+            out: ptr.as_ptr().cast(),
+            // SAFETY: allocate_slice() guarantees the pointer is valid for len.
+            end: unsafe { ptr.as_ptr().add(len) }.cast(),
             pending: 0,
             _marker: PhantomData,
         })
@@ -90,6 +91,6 @@ impl<'a> Pending<'a> {
 
     pub(crate) unsafe fn drop_in(&self, alloc: &Allocator) {
         let len = self.end as usize - self.buf as usize;
-        alloc.deallocate(self.buf, len);
+        alloc.deallocate(NonNull::new_unchecked(self.buf), len);
     }
 }
