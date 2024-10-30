@@ -17,8 +17,13 @@ impl<'a> Writer<'a> {
     }
 
     /// Creates a new `Writer` from an uninitialized buffer.
+    ///
+    /// # Safety
+    ///
+    /// Arguments must satisfy the requirements of [`WeakSliceMut::from_raw_parts_mut`].
     #[inline]
     pub unsafe fn new_uninit(ptr: *mut u8, len: usize) -> Writer<'a> {
+        // SAFETY: [u8] is a valid [MaybeUninit<u8>].
         let buf = unsafe { WeakSliceMut::from_raw_parts_mut(ptr as *mut MaybeUninit<u8>, len) };
         Writer { buf, filled: 0 }
     }
@@ -44,6 +49,8 @@ impl<'a> Writer<'a> {
     /// Returns a shared reference to the filled portion of the buffer.
     #[inline]
     pub fn filled(&self) -> &[u8] {
+        // SAFETY: The filled portion of the buffer consists of initialized bytes, and is always
+        // in-bounds.
         unsafe { core::slice::from_raw_parts(self.buf.as_ptr().cast(), self.filled) }
     }
 
@@ -112,7 +119,7 @@ impl<'a> Writer<'a> {
         let len = range.end - range.start;
 
         if self.remaining() >= len + core::mem::size_of::<C>() {
-            // Safety: we know that our window has at least a core::mem::size_of::<C>() extra bytes
+            // SAFETY: we know that our window has at least a core::mem::size_of::<C>() extra bytes
             // at the end, making it always safe to perform an (unaligned) Chunk read anywhere in
             // the window slice.
             unsafe {
@@ -210,6 +217,7 @@ impl<'a> Writer<'a> {
 
         if current + length + core::mem::size_of::<C>() < capacity {
             let ptr = buf.as_mut_ptr();
+            // SAFETY: if statement ensures length is in bounds for unaligned reads.
             unsafe { Self::copy_chunk_unchecked::<C>(ptr.add(start), ptr.add(current), length) }
         } else {
             // a full simd copy does not fit in the output buffer
@@ -220,27 +228,29 @@ impl<'a> Writer<'a> {
     /// # Safety
     ///
     /// `src` must be safe to perform unaligned reads in `core::mem::size_of::<C>()` chunks until
-    /// `end` is reached. `dst` must be safe to (unalingned) write that number of chunks.
+    /// `end` is reached. `dst` must be safe to (unaligned) write that number of chunks.
     #[inline(always)]
     unsafe fn copy_chunk_unchecked<C: Chunk>(
         mut src: *const MaybeUninit<u8>,
         mut dst: *mut MaybeUninit<u8>,
         length: usize,
     ) {
-        let end = src.add(length);
+        unsafe {
+            let end = src.add(length);
 
-        let chunk = C::load_chunk(src);
-        C::store_chunk(dst, chunk);
-
-        src = src.add(core::mem::size_of::<C>());
-        dst = dst.add(core::mem::size_of::<C>());
-
-        while src < end {
             let chunk = C::load_chunk(src);
             C::store_chunk(dst, chunk);
 
             src = src.add(core::mem::size_of::<C>());
             dst = dst.add(core::mem::size_of::<C>());
+
+            while src < end {
+                let chunk = C::load_chunk(src);
+                C::store_chunk(dst, chunk);
+
+                src = src.add(core::mem::size_of::<C>());
+                dst = dst.add(core::mem::size_of::<C>());
+            }
         }
     }
 }
@@ -259,24 +269,34 @@ fn slice_to_uninit(slice: &[u8]) -> &[MaybeUninit<u8>] {
 }
 
 trait Chunk {
-    /// Safety: must be valid to read a `Self::Chunk` value from `from` with an unaligned read.
+    /// # Safety
+    ///
+    /// Must be valid to read a `Self::Chunk` value from `from` with an unaligned read.
+    ///
+    /// Implementations on SIMD types may have CPU feature requirements.
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self;
 
-    /// Safety: must be valid to write a `Self::Chunk` value to `out` with an unaligned write.
+    /// # Safety
+    ///
+    /// Must be valid to write a `Self::Chunk` value to `out` with an unaligned write.
+    ///
+    /// Implementations on SIMD types may have CPU feature requirements.
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self);
 }
 
 impl Chunk for u64 {
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self {
-        u64::to_le(core::ptr::read_unaligned(from.cast()))
+        u64::to_le(unsafe { core::ptr::read_unaligned(from.cast()) })
     }
 
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self) {
-        core::ptr::copy_nonoverlapping(
-            chunk.to_le_bytes().as_ptr().cast(),
-            out,
-            core::mem::size_of::<Self>(),
-        )
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                chunk.to_le_bytes().as_ptr().cast(),
+                out,
+                core::mem::size_of::<Self>(),
+            )
+        }
     }
 }
 
@@ -284,12 +304,12 @@ impl Chunk for u64 {
 impl Chunk for core::arch::x86_64::__m128i {
     #[inline(always)]
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self {
-        core::arch::x86_64::_mm_loadu_si128(from.cast())
+        unsafe { core::arch::x86_64::_mm_loadu_si128(from.cast()) }
     }
 
     #[inline(always)]
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self) {
-        core::arch::x86_64::_mm_storeu_si128(out as *mut Self, chunk);
+        unsafe { core::arch::x86_64::_mm_storeu_si128(out as *mut Self, chunk) };
     }
 }
 
@@ -297,12 +317,12 @@ impl Chunk for core::arch::x86_64::__m128i {
 impl Chunk for core::arch::x86_64::__m256i {
     #[inline(always)]
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self {
-        core::arch::x86_64::_mm256_loadu_si256(from.cast())
+        unsafe { core::arch::x86_64::_mm256_loadu_si256(from.cast()) }
     }
 
     #[inline(always)]
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self) {
-        core::arch::x86_64::_mm256_storeu_si256(out as *mut Self, chunk);
+        unsafe { core::arch::x86_64::_mm256_storeu_si256(out as *mut Self, chunk) };
     }
 }
 
@@ -314,7 +334,7 @@ impl Chunk for core::arch::x86_64::__m512i {
         // We cross our fingers that LLVM optimizes this into a vmovdqu32
         //
         // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm512_loadu_si512&expand=3420&ig_expand=4110
-        core::ptr::read_unaligned(from.cast())
+        unsafe { core::ptr::read_unaligned(from.cast()) }
     }
 
     #[inline(always)]
@@ -323,7 +343,7 @@ impl Chunk for core::arch::x86_64::__m512i {
         // We cross our fingers that LLVM optimizes this into a vmovdqu32
         //
         // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm512_storeu_si512&expand=3420&ig_expand=4110,6550
-        core::ptr::write_unaligned(out.cast(), chunk)
+        unsafe { core::ptr::write_unaligned(out.cast(), chunk) };
     }
 }
 
@@ -331,12 +351,12 @@ impl Chunk for core::arch::x86_64::__m512i {
 impl Chunk for core::arch::aarch64::uint8x16_t {
     #[inline(always)]
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self {
-        core::arch::aarch64::vld1q_u8(from.cast())
+        unsafe { core::arch::aarch64::vld1q_u8(from.cast()) }
     }
 
     #[inline(always)]
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self) {
-        core::arch::aarch64::vst1q_u8(out.cast(), chunk)
+        unsafe { core::arch::aarch64::vst1q_u8(out.cast(), chunk) };
     }
 }
 
@@ -344,12 +364,12 @@ impl Chunk for core::arch::aarch64::uint8x16_t {
 impl Chunk for core::arch::wasm32::v128 {
     #[inline(always)]
     unsafe fn load_chunk(from: *const MaybeUninit<u8>) -> Self {
-        core::arch::wasm32::v128_load(from.cast())
+        unsafe { core::arch::wasm32::v128_load(from.cast()) }
     }
 
     #[inline(always)]
     unsafe fn store_chunk(out: *mut MaybeUninit<u8>, chunk: Self) {
-        core::arch::wasm32::v128_store(out as *mut Self, chunk)
+        unsafe { core::arch::wasm32::v128_store(out as *mut Self, chunk) };
     }
 }
 
