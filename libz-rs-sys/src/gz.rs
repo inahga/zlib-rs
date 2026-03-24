@@ -373,13 +373,25 @@ unsafe fn gzopen_help(source: Source, mode: *const c_char) -> gzFile {
     }
 
     if state.mode == GzMode::GZ_APPEND {
-        lseek64(state.fd, 0, SEEK_END); // so gzoffset() is correct
+        let ret = lseek64(state.fd, 0, SEEK_END); // so gzoffset() is correct
+        if ret == -1 {
+            // Safety: we know state is a valid pointer because it was allocated earlier in this
+            // function, and it is not used after the free because we return immediately afterward.
+            unsafe { free_state(state) };
+            return ptr::null_mut();
+        }
         state.mode = GzMode::GZ_WRITE; // simplify later checks
     }
 
     if state.mode == GzMode::GZ_READ {
         // Save the current position for rewinding
         state.start = lseek64(state.fd, 0, SEEK_CUR) as _;
+        if state.start == -1 {
+            // Safety: we know state is a valid pointer because it was allocated earlier in this
+            // function, and it is not used after the free because we return immediately afterward.
+            unsafe { free_state(state) };
+            return ptr::null_mut();
+        }
         if state.start == -1 {
             state.start = 0;
         }
