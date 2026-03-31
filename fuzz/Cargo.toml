@@ -36,6 +36,7 @@ features =  ["__internal-fuzz"]
 [dependencies.libz-rs-sys]
 path = "../libz-rs-sys"
 default-features = false
+features = ["gz"]
 
 [dependencies.test-libz-rs-sys]
 path = "../test-libz-rs-sys"
@@ -91,5 +92,23 @@ doc = false
 [[bin]]
 name = "infback"
 path = "fuzz_targets/infback.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "deflate_reset"
+path = "fuzz_targets/deflate_reset.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate_reset"
+path = "fuzz_targets/inflate_reset.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "gz_roundtrip"
+path = "fuzz_targets/gz_roundtrip.rs"
 test = false
 doc = false
